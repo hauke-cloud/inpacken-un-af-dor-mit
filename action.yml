@@ -196,7 +196,6 @@ runs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-      shell: bash
 
     - name: Validate inputs
       shell: bash
@@ -233,7 +232,6 @@ runs:
       with:
         go-version: ${{ inputs.language-version || '1.21' }}
         cache: true
-      shell: bash
 
     - name: Set up Node.js
       if: inputs.language == 'node'
@@ -241,7 +239,6 @@ runs:
       with:
         node-version: ${{ inputs.language-version || '20.x' }}
         cache: 'npm'
-      shell: bash
 
     - name: Set up Python
       if: inputs.language == 'python'
@@ -249,7 +246,6 @@ runs:
       with:
         python-version: ${{ inputs.language-version || '3.11' }}
         cache: 'pip'
-      shell: bash
 
     - name: Set up Java
       if: inputs.language == 'java'
@@ -258,21 +254,18 @@ runs:
         java-version: ${{ inputs.language-version || '17' }}
         distribution: 'temurin'
         cache: 'maven'
-      shell: bash
 
     - name: Set up .NET
       if: inputs.language == 'dotnet'
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: ${{ inputs.language-version || '8.0.x' }}
-      shell: bash
 
     - name: Set up Rust
       if: inputs.language == 'rust'
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: ${{ inputs.language-version || 'stable' }}
-      shell: bash
 
     # ============================================
     # DEPENDENCIES INSTALLATION
@@ -518,7 +511,6 @@ runs:
         files: ./coverage.out,./coverage.xml
         flags: unittests
         fail_ci_if_error: false
-      shell: bash
 
     # ============================================
     # CONTAINER IMAGE BUILD
@@ -526,11 +518,9 @@ runs:
     
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3
-      shell: bash
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-      shell: bash
 
     - name: Log in to Container Registry
       uses: docker/login-action@v3
@@ -538,7 +528,6 @@ runs:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.registry-username }}
         password: ${{ inputs.registry-password }}
-      shell: bash
 
     - name: Extract version information
       id: version
@@ -578,7 +567,6 @@ runs:
           type=sha,prefix={{branch}}-
           type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
           ${{ inputs.additional-tags }}
-      shell: bash
 
     - name: Prepare build arguments
       id: build-args
@@ -616,7 +604,6 @@ runs:
         build-args: ${{ steps.build-args.outputs.args }}
         cache-from: ${{ inputs.cache-enabled == 'true' && 'type=gha' || '' }}
         cache-to: ${{ inputs.cache-enabled == 'true' && 'type=gha,mode=max' || '' }}
-      shell: bash
 
     # ============================================
     # POST-BUILD HOOKS
@@ -636,7 +623,6 @@ runs:
       uses: azure/setup-helm@v4
       with:
         version: 'latest'
-      shell: bash
 
     - name: Determine Helm chart name
       if: inputs.enable-helm == 'true' && github.event_name != 'pull_request'
@@ -770,7 +756,6 @@ runs:
         draft: ${{ inputs.release-draft == 'true' }}
         prerelease: ${{ inputs.release-prerelease == 'true' }}
         token: ${{ inputs.registry-password }}
-      shell: bash
 
     # ============================================
     # SUMMARY
