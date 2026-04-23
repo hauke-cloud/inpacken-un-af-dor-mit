@@ -1,0 +1,795 @@
+name: 'Build, Test, and Release'
+description: 'A comprehensive GitHub Action for building, testing, and releasing containerized applications with Helm support'
+author: 'hauke-cloud'
+
+branding:
+  icon: 'package'
+  color: 'blue'
+
+inputs:
+  # Language and Runtime Configuration
+  language:
+    description: 'Primary language (go, node, python, rust, java, dotnet, generic)'
+    required: true
+    default: 'generic'
+  
+  language-version:
+    description: 'Language version (e.g., "1.21", "20.x", "3.11")'
+    required: false
+    default: ''
+
+  # Build Configuration
+  dockerfile-path:
+    description: 'Path to Dockerfile'
+    required: false
+    default: './Dockerfile'
+  
+  docker-context:
+    description: 'Docker build context path'
+    required: false
+    default: '.'
+  
+  platforms:
+    description: 'Target platforms for multi-arch builds (comma-separated)'
+    required: false
+    default: 'linux/amd64,linux/arm64'
+
+  # Registry Configuration
+  registry:
+    description: 'Container registry URL'
+    required: false
+    default: 'ghcr.io'
+  
+  registry-username:
+    description: 'Registry username (defaults to github.actor)'
+    required: false
+    default: ${{ github.actor }}
+  
+  registry-password:
+    description: 'Registry password/token'
+    required: true
+  
+  image-name:
+    description: 'Image name (defaults to repository name)'
+    required: false
+    default: ${{ github.repository }}
+
+  # Helm Configuration
+  enable-helm:
+    description: 'Enable Helm chart build and push'
+    required: false
+    default: 'false'
+  
+  helm-chart-path:
+    description: 'Path to Helm chart directory'
+    required: false
+    default: './deployments/helm'
+  
+  helm-chart-name:
+    description: 'Helm chart name (defaults to repository name)'
+    required: false
+    default: ''
+  
+  helm-registry:
+    description: 'Helm OCI registry (defaults to container registry)'
+    required: false
+    default: ''
+
+  # Test Configuration
+  run-tests:
+    description: 'Enable test execution'
+    required: false
+    default: 'true'
+  
+  test-command:
+    description: 'Custom test command (language-specific defaults apply)'
+    required: false
+    default: ''
+  
+  enable-coverage:
+    description: 'Enable code coverage reporting'
+    required: false
+    default: 'true'
+  
+  codecov-token:
+    description: 'Codecov token for coverage upload'
+    required: false
+    default: ''
+
+  # Lint Configuration
+  run-lint:
+    description: 'Enable linting'
+    required: false
+    default: 'true'
+  
+  lint-command:
+    description: 'Custom lint command (language-specific defaults apply)'
+    required: false
+    default: ''
+
+  # Release Configuration
+  enable-release:
+    description: 'Enable GitHub Release creation on tags'
+    required: false
+    default: 'true'
+  
+  release-draft:
+    description: 'Create release as draft'
+    required: false
+    default: 'false'
+  
+  release-prerelease:
+    description: 'Mark release as prerelease'
+    required: false
+    default: 'false'
+  
+  release-notes-file:
+    description: 'Path to release notes file (if exists)'
+    required: false
+    default: ''
+
+  # Advanced Configuration
+  build-args:
+    description: 'Additional Docker build arguments (one per line)'
+    required: false
+    default: ''
+  
+  cache-enabled:
+    description: 'Enable build caching'
+    required: false
+    default: 'true'
+  
+  skip-push-on-pr:
+    description: 'Skip pushing images on pull requests'
+    required: false
+    default: 'true'
+  
+  additional-tags:
+    description: 'Additional image tags (one per line)'
+    required: false
+    default: ''
+
+  # Pre/Post Build Hooks
+  pre-build-command:
+    description: 'Command to run before building (e.g., code generation)'
+    required: false
+    default: ''
+  
+  post-build-command:
+    description: 'Command to run after building'
+    required: false
+    default: ''
+
+outputs:
+  image-digest:
+    description: 'Digest of the built image'
+    value: ${{ steps.build.outputs.digest }}
+  
+  image-tags:
+    description: 'Tags applied to the image'
+    value: ${{ steps.meta.outputs.tags }}
+  
+  image-version:
+    description: 'Version extracted from tag or generated'
+    value: ${{ steps.version.outputs.version }}
+  
+  helm-version:
+    description: 'Helm chart version'
+    value: ${{ steps.helm-version.outputs.version }}
+  
+  release-url:
+    description: 'URL of the created GitHub release'
+    value: ${{ steps.release.outputs.url }}
+  
+  test-passed:
+    description: 'Whether tests passed'
+    value: ${{ steps.test-result.outputs.passed }}
+
+runs:
+  using: 'composite'
+  steps:
+    # ============================================
+    # SETUP AND VALIDATION
+    # ============================================
+    
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+      shell: bash
+
+    - name: Validate inputs
+      shell: bash
+      run: |
+        echo "::group::Validating configuration"
+        
+        # Validate language
+        VALID_LANGUAGES="go node python rust java dotnet generic"
+        if [[ ! " $VALID_LANGUAGES " =~ " ${{ inputs.language }} " ]]; then
+          echo "::error::Invalid language: ${{ inputs.language }}"
+          exit 1
+        fi
+        
+        # Check Dockerfile exists
+        if [ ! -f "${{ inputs.dockerfile-path }}" ]; then
+          echo "::warning::Dockerfile not found at ${{ inputs.dockerfile-path }}"
+        fi
+        
+        # Check Helm chart if enabled
+        if [ "${{ inputs.enable-helm }}" == "true" ] && [ ! -d "${{ inputs.helm-chart-path }}" ]; then
+          echo "::error::Helm enabled but chart not found at ${{ inputs.helm-chart-path }}"
+          exit 1
+        fi
+        
+        echo "::endgroup::"
+
+    # ============================================
+    # LANGUAGE-SPECIFIC SETUP
+    # ============================================
+    
+    - name: Set up Go
+      if: inputs.language == 'go'
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.language-version || '1.21' }}
+        cache: true
+      shell: bash
+
+    - name: Set up Node.js
+      if: inputs.language == 'node'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.language-version || '20.x' }}
+        cache: 'npm'
+      shell: bash
+
+    - name: Set up Python
+      if: inputs.language == 'python'
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.language-version || '3.11' }}
+        cache: 'pip'
+      shell: bash
+
+    - name: Set up Java
+      if: inputs.language == 'java'
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.language-version || '17' }}
+        distribution: 'temurin'
+        cache: 'maven'
+      shell: bash
+
+    - name: Set up .NET
+      if: inputs.language == 'dotnet'
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.language-version || '8.0.x' }}
+      shell: bash
+
+    - name: Set up Rust
+      if: inputs.language == 'rust'
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: ${{ inputs.language-version || 'stable' }}
+      shell: bash
+
+    # ============================================
+    # DEPENDENCIES INSTALLATION
+    # ============================================
+    
+    - name: Install dependencies (Go)
+      if: inputs.language == 'go' && inputs.run-tests == 'true'
+      shell: bash
+      run: |
+        echo "::group::Installing Go dependencies"
+        go mod download
+        echo "::endgroup::"
+
+    - name: Install dependencies (Node.js)
+      if: inputs.language == 'node' && inputs.run-tests == 'true'
+      shell: bash
+      run: |
+        echo "::group::Installing Node.js dependencies"
+        npm ci
+        echo "::endgroup::"
+
+    - name: Install dependencies (Python)
+      if: inputs.language == 'python' && inputs.run-tests == 'true'
+      shell: bash
+      run: |
+        echo "::group::Installing Python dependencies"
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        fi
+        if [ -f requirements-dev.txt ]; then
+          pip install -r requirements-dev.txt
+        fi
+        echo "::endgroup::"
+
+    - name: Install dependencies (Rust)
+      if: inputs.language == 'rust' && inputs.run-tests == 'true'
+      shell: bash
+      run: |
+        echo "::group::Installing Rust dependencies"
+        cargo fetch
+        echo "::endgroup::"
+
+    # ============================================
+    # PRE-BUILD HOOKS
+    # ============================================
+    
+    - name: Run pre-build command
+      if: inputs.pre-build-command != ''
+      shell: bash
+      run: ${{ inputs.pre-build-command }}
+
+    # ============================================
+    # LINTING
+    # ============================================
+    
+    - name: Run linting (Go)
+      if: inputs.run-lint == 'true' && inputs.language == 'go'
+      shell: bash
+      run: |
+        echo "::group::Running Go linting"
+        if [ -n "${{ inputs.lint-command }}" ]; then
+          ${{ inputs.lint-command }}
+        else
+          # Format check
+          if [ -n "$(gofmt -s -l . | grep -v '^vendor/')" ]; then
+            echo "::error::Go code is not formatted"
+            gofmt -s -d . | grep -v '^vendor/'
+            exit 1
+          fi
+          # Vet
+          go vet ./...
+        fi
+        echo "::endgroup::"
+
+    - name: Run linting (Node.js)
+      if: inputs.run-lint == 'true' && inputs.language == 'node'
+      shell: bash
+      run: |
+        echo "::group::Running Node.js linting"
+        if [ -n "${{ inputs.lint-command }}" ]; then
+          ${{ inputs.lint-command }}
+        elif grep -q '"lint"' package.json; then
+          npm run lint
+        else
+          echo "No lint command found, skipping"
+        fi
+        echo "::endgroup::"
+
+    - name: Run linting (Python)
+      if: inputs.run-lint == 'true' && inputs.language == 'python'
+      shell: bash
+      run: |
+        echo "::group::Running Python linting"
+        if [ -n "${{ inputs.lint-command }}" ]; then
+          ${{ inputs.lint-command }}
+        else
+          pip install flake8 black isort || true
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+          black --check . || true
+        fi
+        echo "::endgroup::"
+
+    - name: Run linting (Rust)
+      if: inputs.run-lint == 'true' && inputs.language == 'rust'
+      shell: bash
+      run: |
+        echo "::group::Running Rust linting"
+        if [ -n "${{ inputs.lint-command }}" ]; then
+          ${{ inputs.lint-command }}
+        else
+          cargo fmt -- --check
+          cargo clippy -- -D warnings
+        fi
+        echo "::endgroup::"
+
+    - name: Run custom linting
+      if: inputs.run-lint == 'true' && inputs.lint-command != '' && inputs.language == 'generic'
+      shell: bash
+      run: |
+        echo "::group::Running custom linting"
+        ${{ inputs.lint-command }}
+        echo "::endgroup::"
+
+    # ============================================
+    # TESTING
+    # ============================================
+    
+    - name: Run tests (Go)
+      if: inputs.run-tests == 'true' && inputs.language == 'go'
+      shell: bash
+      run: |
+        echo "::group::Running Go tests"
+        if [ -n "${{ inputs.test-command }}" ]; then
+          ${{ inputs.test-command }}
+        else
+          if [ "${{ inputs.enable-coverage }}" == "true" ]; then
+            go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+          else
+            go test -v -race ./...
+          fi
+        fi
+        echo "passed=true" >> $GITHUB_OUTPUT
+        echo "::endgroup::"
+      id: test-result
+      continue-on-error: false
+
+    - name: Run tests (Node.js)
+      if: inputs.run-tests == 'true' && inputs.language == 'node'
+      shell: bash
+      run: |
+        echo "::group::Running Node.js tests"
+        if [ -n "${{ inputs.test-command }}" ]; then
+          ${{ inputs.test-command }}
+        elif grep -q '"test"' package.json; then
+          npm test
+        else
+          echo "No test command found, skipping"
+        fi
+        echo "passed=true" >> $GITHUB_OUTPUT
+        echo "::endgroup::"
+      continue-on-error: false
+
+    - name: Run tests (Python)
+      if: inputs.run-tests == 'true' && inputs.language == 'python'
+      shell: bash
+      run: |
+        echo "::group::Running Python tests"
+        if [ -n "${{ inputs.test-command }}" ]; then
+          ${{ inputs.test-command }}
+        else
+          pip install pytest pytest-cov || true
+          if [ "${{ inputs.enable-coverage }}" == "true" ]; then
+            pytest --cov=. --cov-report=xml
+          else
+            pytest
+          fi
+        fi
+        echo "passed=true" >> $GITHUB_OUTPUT
+        echo "::endgroup::"
+      continue-on-error: false
+
+    - name: Run tests (Rust)
+      if: inputs.run-tests == 'true' && inputs.language == 'rust'
+      shell: bash
+      run: |
+        echo "::group::Running Rust tests"
+        if [ -n "${{ inputs.test-command }}" ]; then
+          ${{ inputs.test-command }}
+        else
+          cargo test --all-features
+        fi
+        echo "passed=true" >> $GITHUB_OUTPUT
+        echo "::endgroup::"
+      continue-on-error: false
+
+    - name: Run tests (Java)
+      if: inputs.run-tests == 'true' && inputs.language == 'java'
+      shell: bash
+      run: |
+        echo "::group::Running Java tests"
+        if [ -n "${{ inputs.test-command }}" ]; then
+          ${{ inputs.test-command }}
+        else
+          mvn test
+        fi
+        echo "passed=true" >> $GITHUB_OUTPUT
+        echo "::endgroup::"
+      continue-on-error: false
+
+    - name: Run tests (.NET)
+      if: inputs.run-tests == 'true' && inputs.language == 'dotnet'
+      shell: bash
+      run: |
+        echo "::group::Running .NET tests"
+        if [ -n "${{ inputs.test-command }}" ]; then
+          ${{ inputs.test-command }}
+        else
+          dotnet test
+        fi
+        echo "passed=true" >> $GITHUB_OUTPUT
+        echo "::endgroup::"
+      continue-on-error: false
+
+    - name: Run custom tests
+      if: inputs.run-tests == 'true' && inputs.test-command != '' && inputs.language == 'generic'
+      shell: bash
+      run: |
+        echo "::group::Running custom tests"
+        ${{ inputs.test-command }}
+        echo "passed=true" >> $GITHUB_OUTPUT
+        echo "::endgroup::"
+      continue-on-error: false
+
+    # ============================================
+    # CODE COVERAGE
+    # ============================================
+    
+    - name: Upload coverage to Codecov
+      if: inputs.enable-coverage == 'true' && inputs.codecov-token != ''
+      uses: codecov/codecov-action@v4
+      with:
+        token: ${{ inputs.codecov-token }}
+        files: ./coverage.out,./coverage.xml
+        flags: unittests
+        fail_ci_if_error: false
+      shell: bash
+
+    # ============================================
+    # CONTAINER IMAGE BUILD
+    # ============================================
+    
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      shell: bash
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      shell: bash
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.registry-username }}
+        password: ${{ inputs.registry-password }}
+      shell: bash
+
+    - name: Extract version information
+      id: version
+      shell: bash
+      run: |
+        echo "::group::Extracting version information"
+        
+        # Determine version
+        if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          VERSION="${GITHUB_REF#refs/tags/v}"
+        elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          VERSION="${GITHUB_REF#refs/tags/}"
+        else
+          VERSION="0.0.0-dev-${GITHUB_SHA::7}"
+        fi
+        
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "commit=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+        echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+        echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+        
+        echo "Version: ${VERSION}"
+        echo "Commit: ${GITHUB_SHA}"
+        echo "::endgroup::"
+
+    - name: Extract Docker metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ inputs.registry }}/${{ inputs.image-name }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+          ${{ inputs.additional-tags }}
+      shell: bash
+
+    - name: Prepare build arguments
+      id: build-args
+      shell: bash
+      run: |
+        echo "::group::Preparing build arguments"
+        
+        # Standard build args
+        BUILD_ARGS="VERSION=${{ steps.version.outputs.version }}"
+        BUILD_ARGS="${BUILD_ARGS}\nCOMMIT=${{ steps.version.outputs.commit }}"
+        BUILD_ARGS="${BUILD_ARGS}\nDATE=${{ steps.version.outputs.date }}"
+        BUILD_ARGS="${BUILD_ARGS}\nBRANCH=${{ steps.version.outputs.branch }}"
+        
+        # Additional build args
+        if [ -n "${{ inputs.build-args }}" ]; then
+          BUILD_ARGS="${BUILD_ARGS}\n${{ inputs.build-args }}"
+        fi
+        
+        echo "args<<EOF" >> $GITHUB_OUTPUT
+        echo -e "${BUILD_ARGS}" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+        echo "::endgroup::"
+
+    - name: Build and push container image
+      id: build
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.docker-context }}
+        file: ${{ inputs.dockerfile-path }}
+        platforms: ${{ inputs.platforms }}
+        push: ${{ (github.event_name != 'pull_request' || inputs.skip-push-on-pr != 'true') && 'true' || 'false' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: ${{ steps.build-args.outputs.args }}
+        cache-from: ${{ inputs.cache-enabled == 'true' && 'type=gha' || '' }}
+        cache-to: ${{ inputs.cache-enabled == 'true' && 'type=gha,mode=max' || '' }}
+      shell: bash
+
+    # ============================================
+    # POST-BUILD HOOKS
+    # ============================================
+    
+    - name: Run post-build command
+      if: inputs.post-build-command != ''
+      shell: bash
+      run: ${{ inputs.post-build-command }}
+
+    # ============================================
+    # HELM CHART BUILD AND PUSH
+    # ============================================
+    
+    - name: Install Helm
+      if: inputs.enable-helm == 'true' && github.event_name != 'pull_request'
+      uses: azure/setup-helm@v4
+      with:
+        version: 'latest'
+      shell: bash
+
+    - name: Determine Helm chart name
+      if: inputs.enable-helm == 'true' && github.event_name != 'pull_request'
+      id: helm-chart
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.helm-chart-name }}" ]; then
+          CHART_NAME="${{ inputs.helm-chart-name }}"
+        else
+          CHART_NAME="${{ github.event.repository.name }}"
+        fi
+        echo "name=${CHART_NAME}" >> $GITHUB_OUTPUT
+
+    - name: Extract Helm version
+      if: inputs.enable-helm == 'true' && github.event_name != 'pull_request'
+      id: helm-version
+      shell: bash
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+    - name: Log in to Helm Registry
+      if: inputs.enable-helm == 'true' && github.event_name != 'pull_request'
+      shell: bash
+      run: |
+        HELM_REGISTRY="${{ inputs.helm-registry }}"
+        if [ -z "$HELM_REGISTRY" ]; then
+          HELM_REGISTRY="${{ inputs.registry }}"
+        fi
+        echo "${{ inputs.registry-password }}" | helm registry login ${HELM_REGISTRY} --username ${{ inputs.registry-username }} --password-stdin
+
+    - name: Update Helm chart metadata
+      if: inputs.enable-helm == 'true' && github.event_name != 'pull_request'
+      shell: bash
+      run: |
+        echo "::group::Updating Helm chart metadata"
+        
+        CHART_PATH="${{ inputs.helm-chart-path }}/${{ steps.helm-chart.outputs.name }}"
+        
+        if [ -f "${CHART_PATH}/Chart.yaml" ]; then
+          sed -i "s/^version:.*/version: ${{ steps.helm-version.outputs.version }}/" "${CHART_PATH}/Chart.yaml"
+          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.helm-version.outputs.version }}\"/" "${CHART_PATH}/Chart.yaml"
+          
+          # Update image tag in values.yaml if exists
+          if [ -f "${CHART_PATH}/values.yaml" ]; then
+            sed -i "s/tag:.*/tag: \"${{ steps.helm-version.outputs.version }}\"/" "${CHART_PATH}/values.yaml"
+          fi
+        else
+          echo "::error::Chart.yaml not found at ${CHART_PATH}"
+          exit 1
+        fi
+        
+        echo "::endgroup::"
+
+    - name: Package Helm chart
+      if: inputs.enable-helm == 'true' && github.event_name != 'pull_request'
+      shell: bash
+      run: |
+        echo "::group::Packaging Helm chart"
+        helm package ${{ inputs.helm-chart-path }}/${{ steps.helm-chart.outputs.name }}
+        echo "::endgroup::"
+
+    - name: Push Helm chart
+      if: inputs.enable-helm == 'true' && github.event_name != 'pull_request'
+      shell: bash
+      run: |
+        echo "::group::Pushing Helm chart"
+        
+        HELM_REGISTRY="${{ inputs.helm-registry }}"
+        if [ -z "$HELM_REGISTRY" ]; then
+          HELM_REGISTRY="${{ inputs.registry }}"
+        fi
+        
+        helm push ${{ steps.helm-chart.outputs.name }}-${{ steps.helm-version.outputs.version }}.tgz \
+          oci://${HELM_REGISTRY}/${{ github.repository_owner }}/charts
+        
+        echo "::endgroup::"
+
+    # ============================================
+    # GITHUB RELEASE
+    # ============================================
+    
+    - name: Generate changelog
+      if: inputs.enable-release == 'true' && startsWith(github.ref, 'refs/tags/')
+      id: changelog
+      shell: bash
+      run: |
+        echo "::group::Generating changelog"
+        
+        # Try to find release notes file first
+        if [ -n "${{ inputs.release-notes-file }}" ] && [ -f "${{ inputs.release-notes-file }}" ]; then
+          cat "${{ inputs.release-notes-file }}" > changelog.md
+        else
+          # Generate from git history
+          echo "## What's Changed" > changelog.md
+          echo "" >> changelog.md
+          
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            git log --pretty=format:"- %s (%h)" ${PREV_TAG}..HEAD >> changelog.md
+          else
+            git log --pretty=format:"- %s (%h)" HEAD >> changelog.md
+          fi
+          
+          echo "" >> changelog.md
+          echo "" >> changelog.md
+          echo "## Container Image" >> changelog.md
+          echo "" >> changelog.md
+          echo '```' >> changelog.md
+          echo "${{ inputs.registry }}/${{ inputs.image-name }}:${{ steps.version.outputs.version }}" >> changelog.md
+          echo '```' >> changelog.md
+          
+          if [ "${{ inputs.enable-helm }}" == "true" ]; then
+            echo "" >> changelog.md
+            echo "## Helm Chart" >> changelog.md
+            echo "" >> changelog.md
+            echo '```bash' >> changelog.md
+            echo "helm pull oci://${{ inputs.registry }}/${{ github.repository_owner }}/charts/${{ steps.helm-chart.outputs.name }} --version ${{ steps.helm-version.outputs.version }}" >> changelog.md
+            echo '```' >> changelog.md
+          fi
+        fi
+        
+        echo "::endgroup::"
+
+    - name: Create GitHub Release
+      if: inputs.enable-release == 'true' && startsWith(github.ref, 'refs/tags/')
+      id: release
+      uses: softprops/action-gh-release@v2
+      with:
+        body_path: changelog.md
+        draft: ${{ inputs.release-draft == 'true' }}
+        prerelease: ${{ inputs.release-prerelease == 'true' }}
+        token: ${{ inputs.registry-password }}
+      shell: bash
+
+    # ============================================
+    # SUMMARY
+    # ============================================
+    
+    - name: Job summary
+      if: always()
+      shell: bash
+      run: |
+        echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Language**: ${{ inputs.language }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version**: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Image**: \`${{ inputs.registry }}/${{ inputs.image-name }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ inputs.enable-helm }}" == "true" ]; then
+          echo "- **Helm Chart**: \`${{ steps.helm-chart.outputs.name }}:${{ steps.helm-version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ steps.release.outputs.url }}" != "" ]; then
+          echo "- **Release**: ${{ steps.release.outputs.url }}" >> $GITHUB_STEP_SUMMARY
+        fi
