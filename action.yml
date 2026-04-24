@@ -564,7 +564,7 @@ runs:
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
           type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
-          type=sha,prefix={{branch}}-
+          type=sha
           type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
           ${{ inputs.additional-tags }}
 
