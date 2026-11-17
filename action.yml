@@ -135,10 +135,19 @@ inputs:
     default: ''
   
   cache-enabled:
-    description: 'Enable build caching'
+    description: 'Enable build caching (GitHub Actions cache; ignored with a remote BuildKit, which keeps its own)'
     required: false
     default: 'true'
-  
+
+  buildkit-endpoint:
+    description: >-
+      Build on this BuildKit daemon (e.g. tcp://buildkitd:1234) with buildx's
+      remote driver instead of a local Docker daemon. Defaults to the
+      BUILDKIT_HOST environment variable. Needs neither a Docker CLI nor a
+      daemon in the job, e.g. on Forgejo runners without Docker access.
+    required: false
+    default: ''
+
   skip-push-on-pr:
     description: 'Skip pushing images on pull requests'
     required: false
@@ -516,18 +525,71 @@ runs:
     # CONTAINER IMAGE BUILD
     # ============================================
     
+    # Local: QEMU and a docker-container builder on the job's Docker daemon
+    # (GitHub-hosted runners). Remote: a BuildKit daemon elsewhere, which
+    # emulates other platforms itself; buildx then runs standalone, so the
+    # job needs no Docker CLI or daemon.
+    - name: Select builder
+      id: builder
+      shell: bash
+      env:
+        ENDPOINT: ${{ inputs.buildkit-endpoint || env.BUILDKIT_HOST }}
+      run: |
+        echo "endpoint=${ENDPOINT}" >> "$GITHUB_OUTPUT"
+        if [ -n "$ENDPOINT" ]; then
+          echo "Building on the remote BuildKit at ${ENDPOINT}"
+        else
+          echo "Building on the local Docker daemon"
+        fi
+
     - name: Set up QEMU
+      if: steps.builder.outputs.endpoint == ''
       uses: docker/setup-qemu-action@v3
 
     - name: Set up Docker Buildx
+      id: buildx
+      if: steps.builder.outputs.endpoint == ''
       uses: docker/setup-buildx-action@v3
 
+    - name: Set up Docker Buildx (remote BuildKit)
+      id: buildx-remote
+      if: steps.builder.outputs.endpoint != ''
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver: remote
+        endpoint: ${{ steps.builder.outputs.endpoint }}
+
     - name: Log in to Container Registry
+      if: steps.builder.outputs.endpoint == ''
       uses: docker/login-action@v3
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.registry-username }}
         password: ${{ inputs.registry-password }}
+
+    # docker/login-action runs `docker login`, which needs the Docker CLI.
+    # buildx reads the same config.json and hands the credentials to
+    # BuildKit for the push. Removed again by the last step.
+    - name: Log in to Container Registry (remote BuildKit)
+      if: steps.builder.outputs.endpoint != ''
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        REGISTRY_USERNAME: ${{ inputs.registry-username }}
+        REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+      run: |
+        config="${DOCKER_CONFIG:-$HOME/.docker}"
+        mkdir -p "$config"
+        umask 077
+        auth=$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 -w0)
+        if [ -f "$config/config.json" ] && command -v jq >/dev/null; then
+          jq --arg r "$REGISTRY" --arg a "$auth" '.auths[$r] = {auth: $a}' \
+            "$config/config.json" > "$config/config.json.new"
+          mv "$config/config.json.new" "$config/config.json"
+        else
+          printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$REGISTRY" "$auth" > "$config/config.json"
+        fi
+        echo "Credentials for ${REGISTRY} written to ${config}/config.json"
 
     - name: Extract version information
       id: version
@@ -595,6 +657,7 @@ runs:
       id: build
       uses: docker/build-push-action@v6
       with:
+        builder: ${{ steps.buildx-remote.outputs.name || steps.buildx.outputs.name }}
         context: ${{ inputs.docker-context }}
         file: ${{ inputs.dockerfile-path }}
         platforms: ${{ inputs.platforms }}
@@ -602,8 +665,10 @@ runs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: ${{ steps.build-args.outputs.args }}
-        cache-from: ${{ inputs.cache-enabled == 'true' && 'type=gha' || '' }}
-        cache-to: ${{ inputs.cache-enabled == 'true' && 'type=gha,mode=max' || '' }}
+        # The gha cache lives on the runner, which a remote BuildKit may not
+        # reach; it keeps its own cache between builds instead.
+        cache-from: ${{ inputs.cache-enabled == 'true' && steps.builder.outputs.endpoint == '' && 'type=gha' || '' }}
+        cache-to: ${{ inputs.cache-enabled == 'true' && steps.builder.outputs.endpoint == '' && 'type=gha,mode=max' || '' }}
 
     # ============================================
     # POST-BUILD HOOKS
@@ -777,4 +842,20 @@ runs:
         
         if [ "${{ steps.release.outputs.url }}" != "" ]; then
           echo "- **Release**: ${{ steps.release.outputs.url }}" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    # Counterpart of "Log in to Container Registry (remote BuildKit)";
+    # docker/login-action logs out by itself in its post step.
+    - name: Log out of Container Registry (remote BuildKit)
+      if: always() && steps.builder.outputs.endpoint != ''
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+      run: |
+        config="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+        [ -f "$config" ] || exit 0
+        if command -v jq >/dev/null; then
+          jq --arg r "$REGISTRY" 'del(.auths[$r])' "$config" > "$config.new" && mv "$config.new" "$config"
+        else
+          rm -f "$config"
         fi
