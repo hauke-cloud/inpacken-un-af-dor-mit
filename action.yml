@@ -812,15 +812,33 @@ runs:
         
         echo "::endgroup::"
 
+    # gh rather than softprops/action-gh-release: Forgejo's runner fetches
+    # every action a composite action uses before it starts, skipped steps
+    # included, and softprops is not on data.forgejo.org, where Forgejo looks
+    # up short `uses:` names -- the whole action would fail there. gh comes
+    # with GitHub's hosted runners. Elsewhere there is no GitHub release to
+    # create, so the step only runs on github.com.
     - name: Create GitHub Release
-      if: inputs.enable-release == 'true' && startsWith(github.ref, 'refs/tags/')
+      if: inputs.enable-release == 'true' && startsWith(github.ref, 'refs/tags/') && github.server_url == 'https://github.com'
       id: release
-      uses: softprops/action-gh-release@v2
-      with:
-        body_path: changelog.md
-        draft: ${{ inputs.release-draft == 'true' }}
-        prerelease: ${{ inputs.release-prerelease == 'true' }}
-        token: ${{ inputs.registry-password }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.registry-password }}
+        GH_REPO: ${{ github.repository }}
+        TAG: ${{ github.ref_name }}
+        DRAFT: ${{ inputs.release-draft }}
+        PRERELEASE: ${{ inputs.release-prerelease }}
+      run: |
+        flags=()
+        if [ "$DRAFT" = "true" ]; then flags+=(--draft); fi
+        if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+        # Like softprops: update the release if the tag already has one.
+        if gh release view "$TAG" >/dev/null 2>&1; then
+          gh release edit "$TAG" --notes-file changelog.md "${flags[@]}"
+        else
+          gh release create "$TAG" --title "$TAG" --notes-file changelog.md --verify-tag "${flags[@]}"
+        fi
+        echo "url=$(gh release view "$TAG" --json url --jq .url)" >> "$GITHUB_OUTPUT"
 
     # ============================================
     # SUMMARY
